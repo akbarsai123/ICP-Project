@@ -1,27 +1,13 @@
 #[macro_use]
 extern crate serde;
-use candid::{Decode, Encode, Nat, Principal, encode_one, decode_one};
-use ic_cdk::api::{call, time};
+use candid::{Decode, Encode, Principal};
+use ic_cdk::api::time;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
 use std::{borrow::Cow, cell::RefCell};
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 type IdCell = Cell<u64, Memory>;
-
-// Definisi token interface USDT
-#[derive(candid::CandidType, Clone, Serialize, Deserialize)]
-struct TokenInterface {
-    token_canister: Principal
-}
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize)]
-struct TokenTransferArgs {
-    to: Principal,
-    value: Nat,
-}
-
-const USDT_CANISTER_ID: &str = "renrk-eyaaa-aaaaa-aaada-cai"; // Ganti dengan ID canister USDT yang sebenarnya
 
 // Struktur untuk menyimpan data PDF SK
 #[derive(candid::CandidType, Clone, Serialize, Deserialize)]
@@ -31,13 +17,6 @@ struct PdfFile {
     is_verified: bool,
     created_at: u64,
     updated_at: Option<u64>,
-}
-
-// Struktur untuk wallet
-#[derive(candid::CandidType, Clone, Serialize, Deserialize)]
-struct Wallet {
-    principal_id: Principal,
-    balance: Nat
 }
 
 // Struktur untuk menyimpan data attendance
@@ -77,21 +56,6 @@ enum ApprovalStatus {
     Pending,
     Approved,
     Rejected,
-}
-
-impl Storable for Wallet {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl BoundedStorable for Wallet {
-    const MAX_SIZE: u32 = 2048;
-    const IS_FIXED_SIZE: bool = false;
 }
 
 impl Storable for Attendance {
@@ -139,24 +103,6 @@ impl BoundedStorable for PayrollApproval {
     const IS_FIXED_SIZE: bool = false;
 }
 
-#[derive(candid::CandidType, Deserialize, Clone, PartialOrd, Ord, Eq, PartialEq)]
-pub struct MyPrincipal(Principal);
-
-impl Storable for MyPrincipal {
-    fn to_bytes(&self) -> Cow<[u8]> {
-        Cow::Owned(encode_one(self).unwrap())
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        decode_one(&bytes).unwrap()
-    }
-}
-
-impl BoundedStorable for MyPrincipal {
-    const MAX_SIZE: u32 = 29;
-    const IS_FIXED_SIZE: bool = false;
-}
-
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
         MemoryManager::init(DefaultMemoryImpl::default())
@@ -178,10 +124,6 @@ thread_local! {
     static APPROVAL_STORAGE: RefCell<StableBTreeMap<(u64, u64), PayrollApproval, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3))))
     );
-
-    static WALLET_STORAGE: RefCell<StableBTreeMap<MyPrincipal, Wallet, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(4))))
-    );
 }
 
 #[derive(candid::CandidType, Serialize, Deserialize)]
@@ -190,18 +132,6 @@ struct EmployeePayload {
     age: u32,
     wage_per_hour: f64,
     wallet_address: String,
-}
-
-// Fungsi Token Interface
-fn get_token_interface() -> TokenInterface {
-    TokenInterface {
-        token_canister: Principal::from_text(USDT_CANISTER_ID).unwrap(),
-    }
-}
-
-fn convert_wage_to_token_amount(wage_amount: f64) -> Nat {
-    let token_amount = (wage_amount * 1_000_000.0) as u64;
-    Nat::from(token_amount)
 }
 
 // Fungsi Perhitungan
@@ -287,44 +217,6 @@ fn record_attendance(nip: u64, check_in: u64, check_out: u64) -> Result<Attendan
     Ok(attendance)
 }
 
-// Wallet dan Transfer Functions
-#[ic_cdk::update]
-async fn transfer_usdt(from: Principal, to: Principal, amount: Nat) -> Result<(), String> {
-    let token_interface = get_token_interface();
-
-    let transfer_args = TokenTransferArgs { to, value: amount };
-
-    match call::call(token_interface.token_canister, "transfer", (transfer_args,)).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to transfer USDT: {:?}", e)),
-    }
-}
-
-#[ic_cdk::update]
-fn register_wallet(principal: Principal) -> Result<Wallet, Error> {
-    let wallet = Wallet {
-        principal_id: principal,
-        balance: Nat::from(0),
-    };
-
-    WALLET_STORAGE.with(|storage| {
-        storage.borrow_mut().insert(MyPrincipal(principal), wallet.clone());
-    });
-
-    Ok(wallet)
-}
-
-#[ic_cdk::query]
-fn get_wallet_balance(principal: Principal) -> Result<Nat, Error> {
-    WALLET_STORAGE.with(|storage| {
-        let storage = storage.borrow();
-        let wallet = storage.get(&MyPrincipal(principal)).ok_or(Error::NotFound {
-            msg: "Wallet not found".to_string(),
-        })?;
-        Ok(wallet.balance)
-    })
-}
-
 // Approval Process
 #[ic_cdk::update]
 fn request_approval(nip: u64, manager_wallet: String) -> Result<PayrollApproval, Error> {
@@ -359,7 +251,7 @@ fn request_approval(nip: u64, manager_wallet: String) -> Result<PayrollApproval,
 
 #[ic_cdk::update]
 async fn approve_payroll(nip: u64, date: u64, approved: bool) -> Result<PayrollApproval, Error> {
-    let approval_result = APPROVAL_STORAGE.with(|storage| {
+    APPROVAL_STORAGE.with(|storage| {
         let mut storage = storage.borrow_mut();
         let mut approval = storage.get(&(nip, date)).ok_or(Error::NotFound {
             msg: format!("Approval request for NIP={} on given date not found", nip),
@@ -373,57 +265,10 @@ async fn approve_payroll(nip: u64, date: u64, approved: bool) -> Result<PayrollA
 
         storage.insert((nip, date), approval.clone());
         Ok(approval)
-    })?;
-
-    if approved {
-        let employee = EMPLOYEE_STORAGE
-            .with(|storage| storage.borrow().get(&approval_result.employee_nip))
-            .ok_or(Error::NotFound {
-                msg: format!("Employee not found"),
-            })?;
-
-        let manager_principal =
-            Principal::from_text(&approval_result.manager_wallet).map_err(|_| {
-                Error::InvalidWallet {
-                    msg: "Invalid manager wallet".to_string(),
-                }
-            })?;
-
-        let employee_principal =
-            Principal::from_text(&employee.wallet_address).map_err(|_| Error::InvalidWallet {
-                msg: "Invalid employee wallet".to_string(),
-            })?;
-
-        let token_amount = convert_wage_to_token_amount(approval_result.wage_amount);
-
-        match transfer_usdt(manager_principal, employee_principal, token_amount).await {
-            Ok(_) => {
-                update_wallet_balance(employee_principal, token_amount.clone())?;
-            }
-            Err(e) => {
-                return Err(Error::TransferFailed { msg: e });
-            }
-        }
-    }
-
-    Ok(approval_result)
-}
-
-// Helper Functions
-fn update_wallet_balance(principal: Principal, amount: Nat) -> Result<(), Error> {
-    WALLET_STORAGE.with(|storage| {
-        let mut storage = storage.borrow_mut();
-        let mut wallet = storage.get(&principal).unwrap_or(Wallet {
-            principal_id: principal,
-            balance: Nat::from(0),
-        });
-
-        wallet.balance += amount;
-        storage.insert(principal, wallet);
-        Ok(())
     })
 }
 
+// Helper Functions
 fn validate_wallet(wallet_address: &str) -> Result<Principal, Error> {
     Principal::from_text(wallet_address).map_err(|_| Error::InvalidWallet {
         msg: "Invalid wallet address format".to_string(),
@@ -435,7 +280,6 @@ fn validate_wallet(wallet_address: &str) -> Result<Principal, Error> {
 enum Error {
     NotFound { msg: String },
     InvalidWallet { msg: String },
-    TransferFailed { msg: String },
 }
 
 // Export Candid interface
